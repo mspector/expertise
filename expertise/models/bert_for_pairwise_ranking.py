@@ -65,86 +65,42 @@ class BertForBayesianPairwiseRanking(transformers.BertPreTrainedModel):
     def __init__(self, config):
         super(BertForBayesianPairwiseRanking, self).__init__(config)
 
-        self.use_cuda = False
-        if torch.cuda.is_available():
-            device_number = torch.cuda.current_device()
-            device = torch.device(device_number)
-            self.use_cuda = True
-            self.device = device
-
         self.bert = transformers.BertModel(config)
-        # self.pos_cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
-        # self.neg_cos_similarity = torch.nn.CosineSimilarity(dim=1, eps=1e-6)
 
-        if self.use_cuda:
-            self.bert = self.bert.to(self.device)
-            # self.pos_cos_similarity = self.pos_cos_similarity.to(self.device)
-            # self.neg_cos_similarity = self.neg_cos_similarity.to(self.device)
+        # two classes: "high bid" or "low bid"
+        self.classifier = torch.nn.Linear(config.hidden_size, 2)
 
         self.init_weights()
+
+        ## This is in the LM training version; what does it do?
+        # self.tie_weights()
+
+    # def tie_weights(self):
+    #     """ Make sure we are sharing the input and output embeddings.
+    #         Export to TorchScript can't handle parameter sharing so we are cloning them instead.
+    #     """
+    #     self._tie_or_clone_weights(
+    #         self.cls.predictions.decoder, # this should be tied to some linear layer, maybe?
+    #         self.bert.embeddings.word_embeddings)
 
     def forward(
         self,
         source_inputs,
-        positive_inputs,
-        negative_inputs=None):
+        target_inputs):
 
-        if self.use_cuda:
-            source_inputs = source_inputs.to(self.device)
-            positive_inputs = positive_inputs.to(self.device)
+        hidden_avgs = []
+        for inputs in [source_inputs, target_inputs]:
+            bert_outputs = self.bert(
+                inputs, attention_mask=attention_mask(inputs))
 
-            if negative_inputs is not None:
-                negative_inputs = negative_inputs.to(self.device)
+            # outputs[0] is the list of hidden states
+            hidden_state_avg = torch.mean(bert_outputs[0], dim=1)
+            hidden_avgs.append(hidden_state_avg)
 
-        # TODO:
-        # See notes on BertModel output. Despite the name "pooled" output,
-        # pooled_output = outputs[1] is apparently the CLS vector,
-        # which isn't a good semantic summary.
-        # Instead, should average or pool across all word vectors.
-        # (or maybe: should average or pool across all keyword vectors?)
-        source_bert_outputs = self.bert(
-            source_inputs,
-            attention_mask=attention_mask(source_inputs))
 
-        positive_bert_outputs = self.bert(
-            positive_inputs,
-            attention_mask=attention_mask(positive_inputs))
+        result = self.classifier(torch.abs(hidden_avgs[1] - hidden_avgs[0]))
 
-        # outputs[0] is the list of hidden states
-        source_avg = torch.mean(source_bert_outputs[0], dim=1)
-        positive_avg = torch.mean(positive_bert_outputs[0], dim=1)
-
-        if self.use_cuda:
-            source_avg = source_avg.to(self.device)
-            positive_avg = positive_avg.to(self.device)
-
-        # positive_scores = self.pos_cos_similarity(source_avg, positive_avg)
-        positive_scores = utils.row_wise_dot(source_avg, positive_avg)
-
-        if negative_inputs is not None:
-
-            if self.use_cuda:
-                targets = torch.ones((source_inputs.shape[0], 1), device=self.device)
-            else:
-                targets = torch.ones((source_inputs.shape[0]), 1)
-
-            negative_bert_outputs = self.bert(
-                negative_inputs,
-                attention_mask=attention_mask(negative_inputs))
-
-            negative_avg = torch.mean(negative_bert_outputs[0], dim=1)
-            # negative_scores = self.neg_cos_similarity(source_avg, negative_avg)
-            negative_scores = utils.row_wise_dot(source_avg, negative_avg)
-
-            loss_fct = torch.nn.BCEWithLogitsLoss()
-            ipdb.set_trace(context=30)
-            loss = loss_fct(
-                positive_scores-negative_scores,
-                targets)
-
-            return (loss, positive_scores, negative_scores)
-
-        return positive_scores
+        return result
 
 
 def train(config):
